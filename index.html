@@ -1,0 +1,670 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Duelo de Dedos — Prototipo de juego con gestos</title>
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,600;12..96,800&display=swap" rel="stylesheet">
+
+<style>
+  /* ===== Paleta =====
+     --fondo:  #10222b  (azul petróleo profundo)
+     --panel:  #183440
+     --texto:  #eaf2f4
+     --heroe:  #3b6cff
+     --enemigo:#e5484d
+     --ambar:  #f5b942  (progreso / cooldown)
+     --ok:     #3ddc97  (éxito)
+  */
+  :root{
+    --fondo:#10222b; --panel:#183440; --linea:#2a4b59; --texto:#eaf2f4; --suave:#9db6bf;
+    --heroe:#3b6cff; --enemigo:#e5484d; --ambar:#f5b942; --ok:#3ddc97;
+  }
+  *{ box-sizing:border-box; }
+  html,body{ margin:0; min-height:100%; background:var(--fondo); color:var(--texto);
+    font-family:"Bricolage Grotesque", "Trebuchet MS", system-ui, sans-serif; }
+  body{ display:flex; flex-direction:column; align-items:center; padding:20px 16px 40px; }
+  h1{ font-size:1.5rem; font-weight:800; margin:0 0 4px; letter-spacing:-.01em; }
+  .sub{ color:var(--suave); margin:0 0 18px; font-size:.95rem; }
+
+  /* ===== Caja de cámara (se reutiliza en calibración y en juego) ===== */
+  #camBox{ position:relative; width:min(100%,640px); aspect-ratio:4/3; background:#000;
+    border:2px solid var(--linea); border-radius:14px; overflow:hidden; }
+  /* Se espeja el video y el esqueleto para que se sienta como un espejo */
+  #camBox video, #camBox canvas{ position:absolute; inset:0; width:100%; height:100%;
+    object-fit:cover; transform:scaleX(-1); }
+  #camBox.listo{ border-color:var(--ok); }
+  #camBox.contando{ border-color:var(--ambar); }
+
+  /* Modo juego: la cámara pasa a ser una miniatura en la esquina */
+  body.playing #camBox{ position:fixed; right:14px; bottom:14px; width:220px; z-index:5;
+    box-shadow:0 8px 24px rgba(0,0,0,.45); }
+  body.playing #calibUI{ display:none; }
+  body.calibrating #gameWrap{ display:none; }
+
+  /* ===== UI de calibración ===== */
+  #calibUI{ width:min(100%,640px); margin-top:16px; display:flex; flex-direction:column; gap:14px; }
+  #mensaje{ font-size:1.15rem; font-weight:800; text-align:center; line-height:1.3; }
+  #mensaje.ok{ color:var(--ok); }
+  #barra{ height:12px; background:var(--panel); border-radius:99px; overflow:hidden; border:1px solid var(--linea); }
+  #barra > div{ height:100%; width:0%; background:var(--ambar); transition:width .08s linear; }
+  #dedos{ display:flex; gap:8px; justify-content:center; flex-wrap:wrap; }
+  .dedo{ padding:6px 12px; border-radius:99px; background:var(--panel); border:1px solid var(--linea);
+    font-size:.85rem; color:var(--suave); }
+  .dedo.on{ background:#1d4a3a; border-color:var(--ok); color:var(--ok); }
+  #estadoDebug{ text-align:center; font-size:.85rem; color:var(--suave); min-height:1.2em; }
+  button{ font:inherit; font-weight:800; font-size:1.05rem; padding:12px 22px; border-radius:10px;
+    border:0; cursor:pointer; background:var(--ambar); color:#2a1d00; }
+  button:hover{ filter:brightness(1.08); }
+  button:focus-visible{ outline:3px solid #fff; outline-offset:2px; }
+  button.exito{ background:var(--ok); color:#052a1a; }
+  button[hidden]{ display:none; }
+  #btnCamara{ align-self:center; }
+
+  /* ===== Juego ===== */
+  #gameWrap{ position:relative; width:min(100%,900px); }
+  #game{ width:100%; height:auto; display:block; border-radius:14px; border:2px solid var(--linea);
+    background:#0b1a21; }
+  #btnReiniciar{ position:absolute; left:50%; top:62%; transform:translateX(-50%); }
+  .ayuda{ margin-top:12px; color:var(--suave); font-size:.9rem; text-align:center; line-height:1.5; }
+
+  @media (prefers-reduced-motion: reduce){ #barra > div{ transition:none; } }
+</style>
+</head>
+
+<body class="calibrating">
+  <h1>Duelo de Dedos</h1>
+  <p class="sub">Controla el combate con los dedos de tu mano frente a la cámara.</p>
+
+  <!-- Cámara + esqueleto de mano (visible en calibración y como miniatura en el juego) -->
+  <div id="camBox">
+    <video id="video" playsinline muted></video>
+    <canvas id="overlay"></canvas>
+  </div>
+
+  <!-- ================= FASE 1: CALIBRACIÓN ================= -->
+  <section id="calibUI">
+    <div id="mensaje">POR FAVOR, MUESTRA TU MANO ABIERTA FRENTE A LA CÁMARA PARA CALIBRAR</div>
+    <div id="barra" aria-label="Progreso de calibración"><div></div></div>
+    <div id="dedos">
+      <span class="dedo" data-d="thumb">Pulgar</span>
+      <span class="dedo" data-d="index">Índice</span>
+      <span class="dedo" data-d="middle">Medio</span>
+      <span class="dedo" data-d="ring">Anular</span>
+      <span class="dedo" data-d="pinky">Meñique</span>
+    </div>
+    <div id="estadoDebug">Pulsa «Activar cámara» para empezar.</div>
+    <button id="btnCamara">Activar cámara</button>
+    <button id="btnIniciar" class="exito" hidden>CALIBRACIÓN EXITOSA: Iniciar Juego</button>
+  </section>
+
+  <!-- ================= FASE 2: JUEGO ================= -->
+  <section id="gameWrap">
+    <canvas id="game" width="800" height="450"></canvas>
+    <button id="btnReiniciar" class="exito" hidden>Jugar de nuevo</button>
+    <p class="ayuda">
+      Mano abierta = moverte arriba / abajo · Índice solo = disparo ligero · Índice + medio = disparo pesado (recarga 2 s) · Puño cerrado = escudo<br>
+      Prueba sin cámara: mantén pulsada la tecla 1 (ligero), 2 (pesado) o 3 (escudo); flechas ↑ ↓ o W / S para moverte.
+    </p>
+  </section>
+
+<!-- MediaPipe Hands (solución clásica, se ejecuta 100% en el navegador) -->
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils@0.3.1675466124/drawing_utils.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.js" crossorigin="anonymous"></script>
+
+<script>
+"use strict";
+
+/* =====================================================================
+   1. DETECCIÓN DE DEDOS A PARTIR DE LOS PUNTOS CLAVE DE MEDIAPIPE
+   ---------------------------------------------------------------------
+   MediaPipe entrega 21 puntos por mano (coordenadas normalizadas 0..1):
+     0 = muñeca
+     Pulgar:  1(CMC) 2(MCP) 3(IP)  4(punta)
+     Índice:  5(MCP) 6(PIP) 7(DIP) 8(punta)
+     Medio:   9      10     11     12
+     Anular:  13     14     15     16
+     Meñique: 17     18     19     20
+
+   Regla para índice, medio, anular y meñique:
+     "Extendido"  <=>  la punta está MÁS LEJOS de la muñeca que la
+                       articulación PIP (con un margen del 15 %).
+   Se usa la DISTANCIA a la muñeca (no la coordenada Y) para que el
+   gesto funcione aunque la mano esté inclinada o rotada.
+
+   Regla para el pulgar (se mueve de lado, no hacia arriba):
+     "Extendido"  <=>  la punta (4) está más lejos de la base del meñique
+                       (17) que la articulación IP (3). Si el pulgar se
+                       dobla sobre la palma, la punta se acerca al meñique.
+   ===================================================================== */
+const LM = {
+  wrist: 0,
+  thumb:  { ip: 3, tip: 4 },
+  index:  { pip: 6,  tip: 8 },
+  middle: { pip: 10, tip: 12 },
+  ring:   { pip: 14, tip: 16 },
+  pinky:  { pip: 18, tip: 20, mcp: 17 }
+};
+const MARGEN_DEDO = 1.15;   // la punta debe superar 15 % la distancia muñeca-PIP
+const MARGEN_PULGAR = 1.10;
+
+let aspecto = 4 / 3; // ancho/alto del video; corrige la distorsión de coordenadas normalizadas
+function dist(a, b) {
+  // Las coordenadas x,y están normalizadas por separado; se multiplica x por el aspecto
+  // para medir distancias reales en la imagen.
+  return Math.hypot((a.x - b.x) * aspecto, a.y - b.y);
+}
+
+/** Devuelve {thumb, index, middle, ring, pinky} con true si el dedo está extendido. */
+function estadoDeDedos(lm) {
+  const w = lm[LM.wrist];
+  const largo = (f) => dist(w, lm[f.tip]) > dist(w, lm[f.pip]) * MARGEN_DEDO;
+  return {
+    thumb:  dist(lm[LM.thumb.tip], lm[LM.pinky.mcp]) > dist(lm[LM.thumb.ip], lm[LM.pinky.mcp]) * MARGEN_PULGAR,
+    index:  largo(LM.index),
+    middle: largo(LM.middle),
+    ring:   largo(LM.ring),
+    pinky:  largo(LM.pinky)
+  };
+}
+
+/* =====================================================================
+   2. CLASIFICACIÓN DE GESTOS
+   ---------------------------------------------------------------------
+   El pulgar se IGNORA en los gestos de combate porque es el dedo más
+   inestable de detectar; solo cuenta en la calibración ("5 dedos").
+
+   - 'open'  : los 5 dedos extendidos (solo para calibrar).
+   - 'light' : SOLO índice levantado           -> Ataque Ligero.
+   - 'heavy' : índice + medio, anular y meñique doblados ("Paz")
+               -> Ataque Pesado.
+   - 'fist'  : ningún dedo levantado (índice, medio, anular, meñique
+               doblados)                       -> Bloqueo.
+   - 'other' : cualquier otra combinación (no hace nada).
+   - 'none'  : no hay mano en pantalla.
+   ===================================================================== */
+function clasificarGesto(d) {
+  if (d.thumb && d.index && d.middle && d.ring && d.pinky) return 'open';
+  if ( d.index && !d.middle && !d.ring && !d.pinky) return 'light';
+  if ( d.index &&  d.middle && !d.ring && !d.pinky) return 'heavy';
+  if (!d.index && !d.middle && !d.ring && !d.pinky) return 'fist';
+  return 'other';
+}
+
+/* =====================================================================
+   3. ESTABILIZADOR (anti-parpadeo)
+   ---------------------------------------------------------------------
+   La detección por fotograma puede "parpadear". Se guarda el historial
+   de los últimos 7 fotogramas y el gesto solo cambia cuando uno de ellos
+   aparece al menos 5 veces (voto por mayoría). Así un solo fotograma
+   malo no dispara ni cancela un ataque.
+   ===================================================================== */
+const HISTORIAL = 7, MINIMO_VOTOS = 5;
+const historial = [];
+let gestoEstable = 'none';
+function estabilizar(crudo) {
+  historial.push(crudo);
+  if (historial.length > HISTORIAL) historial.shift();
+  const cuenta = {};
+  for (const g of historial) cuenta[g] = (cuenta[g] || 0) + 1;
+  for (const g in cuenta) if (cuenta[g] >= MINIMO_VOTOS) gestoEstable = g;
+  return gestoEstable;
+}
+
+/* =====================================================================
+   4. CÁMARA + MEDIAPIPE + CALIBRACIÓN (FASE 1)
+   ===================================================================== */
+const video   = document.getElementById('video');
+const overlay = document.getElementById('overlay');
+const octx    = overlay.getContext('2d');
+const camBox  = document.getElementById('camBox');
+const elMensaje = document.getElementById('mensaje');
+const elBarra   = document.querySelector('#barra > div');
+const elDebug   = document.getElementById('estadoDebug');
+const btnCamara = document.getElementById('btnCamara');
+const btnIniciar= document.getElementById('btnIniciar');
+const chips = {};
+document.querySelectorAll('.dedo').forEach(c => chips[c.dataset.d] = c);
+
+const TIEMPO_CALIBRACION = 2000; // ms con los 5 dedos extendidos
+let calibrado = false;
+let abiertaDesde = null;         // instante en que empezó la mano abierta continua
+let sinManoFrames = 0;
+let hands = null;
+
+btnCamara.addEventListener('click', iniciarCamara);
+
+async function iniciarCamara() {
+  btnCamara.hidden = true;
+  elDebug.textContent = 'Cargando modelo de detección de manos…';
+  try {
+    hands = new Hands({
+      // Los archivos del modelo (wasm, tflite) se descargan desde el CDN
+      locateFile: (archivo) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/${archivo}`
+    });
+    hands.setOptions({
+      maxNumHands: 1,               // un solo jugador, una sola mano
+      modelComplexity: 1,           // 1 = más preciso (0 = más rápido)
+      minDetectionConfidence: 0.7,
+      minTrackingConfidence: 0.6
+    });
+    hands.onResults(alRecibirResultados);
+
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { width: 640, height: 480, facingMode: 'user' }, audio: false
+    });
+    video.srcObject = stream;
+    await video.play();
+    aspecto = video.videoWidth / video.videoHeight;
+    overlay.width = video.videoWidth;
+    overlay.height = video.videoHeight;
+
+    elDebug.textContent = 'Cámara activa. Muestra tu mano abierta.';
+    bucleDeteccion();
+  } catch (err) {
+    console.error(err);
+    btnCamara.hidden = false;
+    btnCamara.textContent = 'Reintentar';
+    elDebug.textContent = 'No se pudo iniciar la cámara: ' + (err.message || err) +
+      ' (Recuerda: hace falta http://localhost o HTTPS y permitir el acceso a la cámara).';
+  }
+}
+
+/** Envía un fotograma a MediaPipe cada vez que el anterior terminó de procesarse. */
+let procesando = false;
+async function bucleDeteccion() {
+  if (video.readyState >= 2 && !procesando) {
+    procesando = true;
+    try { await hands.send({ image: video }); } catch (e) { console.error(e); }
+    procesando = false;
+  }
+  requestAnimationFrame(bucleDeteccion);
+}
+
+/** Se llama una vez por cada fotograma analizado. */
+function alRecibirResultados(res) {
+  // ---- Dibujar el esqueleto de la mano sobre el video ----
+  octx.clearRect(0, 0, overlay.width, overlay.height);
+  const lm = res.multiHandLandmarks && res.multiHandLandmarks[0];
+
+  let crudo = 'none';
+  let dedos = null;
+
+  if (lm) {
+    sinManoFrames = 0;
+    drawConnectors(octx, lm, HAND_CONNECTIONS, { color: '#3ddc97', lineWidth: 4 });
+    drawLandmarks(octx, lm, { color: '#ffffff', fillColor: '#3b6cff', lineWidth: 1, radius: 4 });
+    dedos = estadoDeDedos(lm);
+    crudo = clasificarGesto(dedos);
+    manoY = lm[9].y;   // punto 9 = base del dedo medio ≈ centro de la palma (estable para seguir la altura)
+  } else {
+    // Tolerancia: si se pierde la mano 1-2 fotogramas, se arrastra el gesto anterior
+    sinManoFrames++;
+    if (sinManoFrames < 3) crudo = historial[historial.length - 1] || 'none';
+  }
+
+  const estable = estabilizar(crudo);
+  gestoActual = estable;
+
+  if (!calibrado) actualizarCalibracion(estable, dedos);
+  else mostrarGestoEnMiniatura(estable);
+}
+
+/* ---------- Validación de calibración ----------
+   Condición: gesto estable 'open' (mano presente + 5 dedos extendidos)
+   mantenido 2 segundos SIN interrupción. Si se pierde, el contador
+   vuelve a cero. */
+function actualizarCalibracion(estable, dedos) {
+  for (const k in chips) chips[k].classList.toggle('on', !!(dedos && dedos[k]));
+  elDebug.textContent = 'Gesto detectado: ' + nombreGesto(estable);
+
+  if (estable === 'open') {
+    if (abiertaDesde === null) abiertaDesde = performance.now();
+    const prog = Math.min(1, (performance.now() - abiertaDesde) / TIEMPO_CALIBRACION);
+    elBarra.style.width = (prog * 100) + '%';
+    camBox.classList.add('contando');
+    elMensaje.textContent = 'Mantén la mano abierta… ' + Math.ceil((1 - prog) * 2) + ' s';
+    if (prog >= 1) calibracionExitosa();
+  } else {
+    abiertaDesde = null;
+    elBarra.style.width = '0%';
+    camBox.classList.remove('contando');
+    elMensaje.textContent = 'POR FAVOR, MUESTRA TU MANO ABIERTA FRENTE A LA CÁMARA PARA CALIBRAR';
+  }
+}
+
+function calibracionExitosa() {
+  calibrado = true;
+  camBox.classList.remove('contando');
+  camBox.classList.add('listo');
+  elMensaje.textContent = 'CALIBRACIÓN EXITOSA';
+  elMensaje.classList.add('ok');
+  btnIniciar.hidden = false;
+  btnIniciar.focus();
+}
+
+function nombreGesto(g) {
+  return { none:'sin mano', open:'mano abierta', light:'índice (ataque ligero)',
+           heavy:'índice + medio (ataque pesado)', fist:'puño (escudo)', other:'otro' }[g] || g;
+}
+function mostrarGestoEnMiniatura() { /* el gesto actual se pinta dentro del canvas del juego (HUD) */ }
+
+/* =====================================================================
+   5. JUEGO (FASE 2 y 3)
+   ===================================================================== */
+const gameCanvas = document.getElementById('game');
+const g = gameCanvas.getContext('2d');
+const W = gameCanvas.width, H = gameCanvas.height;
+const btnReiniciar = document.getElementById('btnReiniciar');
+
+let gestoActual = 'none';   // lo actualiza MediaPipe
+let manoY = null;           // altura de la palma en el video (0 = arriba, 1 = abajo); la actualiza MediaPipe
+let teclaForzada = null;    // solo para pruebas sin cámara (teclas 1, 2, 3)
+const teclasMover = { arriba: false, abajo: false };   // pruebas sin cámara (flechas o W / S)
+addEventListener('keydown', e => {
+  teclaForzada = { '1':'light', '2':'heavy', '3':'fist' }[e.key] || teclaForzada;
+  if (e.key === 'ArrowUp'   || e.key === 'w') { teclasMover.arriba = true; e.preventDefault(); }
+  if (e.key === 'ArrowDown' || e.key === 's') { teclasMover.abajo  = true; e.preventDefault(); }
+});
+addEventListener('keyup', e => {
+  if ('123'.includes(e.key)) teclaForzada = null;
+  if (e.key === 'ArrowUp'   || e.key === 'w') teclasMover.arriba = false;
+  if (e.key === 'ArrowDown' || e.key === 's') teclasMover.abajo  = false;
+});
+const gestoEfectivo = () => teclaForzada || gestoActual;
+
+// ---------- Parámetros de los ataques ----------
+const ATAQUE_LIGERO = { velocidad: 700, radio: 5,  dano: 5,  recarga: 0.28 };
+const ATAQUE_PESADO = { velocidad: 280, radio: 15, dano: 30, recarga: 2.0  };  // cooldown de 2 s
+
+// ---------- Niveles ----------
+// Dificultad progresiva. Campos:
+//   enemigos     : cuántos enemigos hay a la vez
+//   vidaEnemigo  : vida de CADA enemigo
+//   tamano       : lado del cuadrado de cada enemigo (más enemigos -> más pequeños)
+//   seMueve      : si suben y bajan (desde el nivel 2)
+//   velEnemigo   : velocidad vertical de cada enemigo (px/s)
+//   cadaDisparo  : segundos entre disparos de CADA enemigo
+//   velProyectil : velocidad de sus proyectiles (px/s)
+//   danoJugador  : daño que te hace cada proyectil que no bloqueas
+//   balas        : proyectiles por disparo (en abanico)
+//
+// Niveles 1-4: un solo enemigo cada vez más fuerte.
+// Desde el nivel 5: varios enemigos, pero individualmente más débiles
+// (menos vida y menos daño por proyectil); el reto es el número y el ritmo de disparos.
+const NIVELES = [
+  { nombre: 'Nivel 1',  enemigos: 1, vidaEnemigo: 100, tamano: 60, seMueve: false, velEnemigo: 0,   cadaDisparo: 2.2, velProyectil: 240, danoJugador: 15, balas: 1 },
+  { nombre: 'Nivel 2',  enemigos: 1, vidaEnemigo: 120, tamano: 60, seMueve: true,  velEnemigo: 70,  cadaDisparo: 1.6, velProyectil: 320, danoJugador: 15, balas: 1 },
+  { nombre: 'Nivel 3',  enemigos: 1, vidaEnemigo: 140, tamano: 56, seMueve: true,  velEnemigo: 100, cadaDisparo: 1.4, velProyectil: 340, danoJugador: 15, balas: 1 },
+  { nombre: 'Nivel 4',  enemigos: 1, vidaEnemigo: 160, tamano: 52, seMueve: true,  velEnemigo: 130, cadaDisparo: 1.2, velProyectil: 360, danoJugador: 16, balas: 2 },
+  { nombre: 'Nivel 5',  enemigos: 2, vidaEnemigo: 70,  tamano: 48, seMueve: true,  velEnemigo: 100, cadaDisparo: 2.0, velProyectil: 320, danoJugador: 10, balas: 1 },
+  { nombre: 'Nivel 6',  enemigos: 2, vidaEnemigo: 85,  tamano: 46, seMueve: true,  velEnemigo: 130, cadaDisparo: 1.8, velProyectil: 340, danoJugador: 10, balas: 1 },
+  { nombre: 'Nivel 7',  enemigos: 3, vidaEnemigo: 60,  tamano: 42, seMueve: true,  velEnemigo: 130, cadaDisparo: 2.3, velProyectil: 330, danoJugador: 8,  balas: 1 },
+  { nombre: 'Nivel 8',  enemigos: 3, vidaEnemigo: 75,  tamano: 40, seMueve: true,  velEnemigo: 160, cadaDisparo: 2.0, velProyectil: 350, danoJugador: 8,  balas: 1 },
+  { nombre: 'Nivel 9',  enemigos: 4, vidaEnemigo: 55,  tamano: 38, seMueve: true,  velEnemigo: 150, cadaDisparo: 2.5, velProyectil: 340, danoJugador: 7,  balas: 1 },
+  { nombre: 'Nivel 10', enemigos: 5, vidaEnemigo: 60,  tamano: 36, seMueve: true,  velEnemigo: 180, cadaDisparo: 2.7, velProyectil: 350, danoJugador: 6,  balas: 1 }
+];
+
+const heroe = { x: 50, y: H/2 - 25, w: 50, h: 50, vida: 100, vidaMax: 100, golpe: 0, escudo: false };
+let enemigos = [];          // lista de enemigos vivos del nivel actual
+let balasJugador = [], balasEnemigo = [], chispas = [];
+let nivel = 0;
+let estado = 'playing';     // 'playing' | 'transicion' | 'derrota' | 'victoria'
+let temporizador = 0;
+let recargaLigera = 0, recargaPesada = 0;
+let ultimoTiempo = 0, corriendo = false;
+
+btnIniciar.addEventListener('click', () => {
+  document.body.classList.remove('calibrating');
+  document.body.classList.add('playing');
+  reiniciarJuego();
+  if (!corriendo) { corriendo = true; requestAnimationFrame(bucleJuego); }
+});
+btnReiniciar.addEventListener('click', reiniciarJuego);
+
+function reiniciarJuego() { btnReiniciar.hidden = true; cargarNivel(0); }
+
+function cargarNivel(i) {
+  nivel = i;
+  const n = NIVELES[i];
+  heroe.vida = heroe.vidaMax; heroe.golpe = 0; heroe.escudo = false;
+  heroe.y = H/2 - heroe.h/2;   // el héroe vuelve al centro al empezar cada nivel
+
+  // Se crean los enemigos del nivel. Se reparten en 3 columnas (para no taparse del todo),
+  // empiezan a alturas distintas, se mueven en direcciones alternas y disparan desfasados.
+  enemigos = [];
+  const zona = H - 30 - n.tamano - 40;                 // recorrido vertical disponible
+  for (let k = 0; k < n.enemigos; k++) {
+    const frac = n.enemigos === 1 ? 0.5 : k / (n.enemigos - 1);
+    enemigos.push({
+      x: W - 110 - (k % 3) * 75,
+      y: 20 + frac * zona,
+      w: n.tamano, h: n.tamano,
+      vida: n.vidaEnemigo, vidaMax: n.vidaEnemigo,
+      dir: k % 2 === 0 ? 1 : -1,
+      golpe: 0,
+      reloj: n.cadaDisparo * (0.5 + 0.35 * k)          // disparos desfasados entre enemigos
+    });
+  }
+  balasJugador = []; balasEnemigo = []; chispas = [];
+  recargaLigera = 0; recargaPesada = 0;
+  estado = 'playing';
+}
+
+function bucleJuego(t) {
+  const dt = Math.min(0.05, (t - ultimoTiempo) / 1000 || 0);  // segundos; limitado para evitar saltos
+  ultimoTiempo = t;
+  actualizar(dt);
+  dibujar();
+  requestAnimationFrame(bucleJuego);
+}
+
+function disparar(tipo) {
+  balasJugador.push({
+    x: heroe.x + heroe.w, y: heroe.y + heroe.h / 2,
+    r: tipo.radio, vx: tipo.velocidad, dano: tipo.dano,
+    pesada: tipo === ATAQUE_PESADO
+  });
+}
+
+function actualizar(dt) {
+  if (estado === 'transicion' || estado === 'derrota') {
+    temporizador -= dt;
+    if (temporizador <= 0) {
+      if (estado === 'transicion') cargarNivel(nivel + 1);
+      else cargarNivel(nivel);            // derrota: se reinicia el mismo nivel
+    }
+    return;
+  }
+  if (estado !== 'playing') return;
+
+  const n = NIVELES[nivel];
+  const gesto = gestoEfectivo();
+
+  recargaLigera = Math.max(0, recargaLigera - dt);
+  recargaPesada = Math.max(0, recargaPesada - dt);
+  heroe.golpe   = Math.max(0, heroe.golpe - dt);
+  for (const e of enemigos) e.golpe = Math.max(0, e.golpe - dt);
+
+  /* ---------- LÓGICA DE COMBATE POR GESTOS ----------
+     light: solo índice  -> proyectil pequeño y rápido, poco daño.
+     heavy: índice+medio -> proyectil grande y lento, mucho daño,
+                            con cooldown de 2 s (recargaPesada).
+     fist : puño cerrado -> escudo activo MIENTRAS el gesto se mantenga;
+                            los proyectiles enemigos se destruyen al tocarlo. */
+  heroe.escudo = (gesto === 'fist');
+
+  /* ---------- MOVIMIENTO VERTICAL (mano abierta) ----------
+     Con la mano abierta (gesto 'open') el héroe sigue la altura de tu palma:
+     mano arriba -> héroe arriba, mano abajo -> héroe abajo.
+     Se usa solo el tramo central del video (20 %–80 % de la altura) para que
+     no tengas que sacar la mano del encuadre para llegar a los extremos.
+     Con otros gestos el héroe se queda donde está (así puedes apuntar y atacar).
+     Mientras la mano está abierta no se dispara. */
+  const sueloY = H - 30 - heroe.h - 4, techoY = 10;
+  if (gesto === 'open' && manoY !== null) {
+    const t = Math.min(1, Math.max(0, (manoY - 0.2) / 0.6));
+    const objetivo = techoY + t * (sueloY - techoY);
+    heroe.y += (objetivo - heroe.y) * Math.min(1, dt * 10);   // suavizado anti-temblor
+  }
+  // Pruebas sin cámara: flechas o W / S
+  if (teclasMover.arriba) heroe.y -= 320 * dt;
+  if (teclasMover.abajo)  heroe.y += 320 * dt;
+  heroe.y = Math.min(sueloY, Math.max(techoY, heroe.y));
+  if (gesto === 'light' && recargaLigera === 0) { disparar(ATAQUE_LIGERO); recargaLigera = ATAQUE_LIGERO.recarga; }
+  if (gesto === 'heavy' && recargaPesada === 0) { disparar(ATAQUE_PESADO); recargaPesada = ATAQUE_PESADO.recarga; }
+
+  // ---------- Enemigos: movimiento vertical (cada uno rebota entre el techo y el suelo) ----------
+  for (const e of enemigos) {
+    if (!n.seMueve) break;
+    e.y += e.dir * n.velEnemigo * dt;
+    const min = 20, max = H - 30 - e.h - 20;
+    if (e.y < min) { e.y = min; e.dir = 1; }
+    if (e.y > max) { e.y = max; e.dir = -1; }
+  }
+
+  // ---------- Enemigos: cada uno dispara hacia el héroe con su propio reloj ----------
+  for (const e of enemigos) {
+    e.reloj -= dt;
+    if (e.reloj > 0) continue;
+    e.reloj = n.cadaDisparo;
+    const ox = e.x, oy = e.y + e.h / 2;
+    const dx = (heroe.x + heroe.w / 2) - ox, dy = (heroe.y + heroe.h / 2) - oy;
+    const ang = Math.atan2(dy, dx);
+    // Si el nivel tiene varias balas por disparo, salen en abanico (~0.22 rad entre ellas)
+    for (let i = 0; i < n.balas; i++) {
+      const a = ang + (i - (n.balas - 1) / 2) * 0.22;
+      balasEnemigo.push({ x: ox, y: oy, r: 8, vx: Math.cos(a) * n.velProyectil, vy: Math.sin(a) * n.velProyectil });
+    }
+  }
+
+  // ---------- Proyectiles del jugador: golpean al PRIMER enemigo que toquen ----------
+  for (const b of balasJugador) {
+    b.x += b.vx * dt;
+    const e = enemigos.find(e =>
+      b.x + b.r > e.x && b.x - b.r < e.x + e.w &&
+      b.y + b.r > e.y && b.y - b.r < e.y + e.h);
+    if (e) {
+      e.vida = Math.max(0, e.vida - b.dano);
+      e.golpe = 0.12;
+      crearChispas(b.x, b.y, '#ffd37a', b.pesada ? 12 : 5);
+      if (e.vida <= 0) crearChispas(e.x + e.w / 2, e.y + e.h / 2, '#e5484d', 18);   // explosión al morir
+      b.muerta = true;
+    } else if (b.x > W + 20) b.muerta = true;
+  }
+  enemigos = enemigos.filter(e => e.vida > 0);   // los enemigos derrotados desaparecen
+  balasJugador = balasJugador.filter(b => !b.muerta);
+
+  // ---------- Proyectiles del enemigo ----------
+  for (const b of balasEnemigo) {
+    b.x += b.vx * dt; b.y += b.vy * dt;
+    const toca = b.x - b.r < heroe.x + heroe.w && b.x + b.r > heroe.x &&
+                 b.y + b.r > heroe.y && b.y - b.r < heroe.y + heroe.h;
+    if (toca) {
+      if (heroe.escudo) { crearChispas(b.x, b.y, '#7fb0ff', 8); }   // bloqueado: inmune
+      else { heroe.vida = Math.max(0, heroe.vida - n.danoJugador); heroe.golpe = 0.2; crearChispas(b.x, b.y, '#ff8a8e', 8); }
+      b.muerta = true;
+    } else if (b.x < -20 || b.y < -20 || b.y > H + 20) b.muerta = true;
+  }
+  balasEnemigo = balasEnemigo.filter(b => !b.muerta);
+
+  // ---------- Partículas ----------
+  for (const c of chispas) { c.x += c.vx * dt; c.y += c.vy * dt; c.vida -= dt; }
+  chispas = chispas.filter(c => c.vida > 0);
+
+  // ---------- Victoria / derrota ----------
+  if (enemigos.length === 0) {   // el nivel se supera al derrotar a TODOS los enemigos
+    if (nivel + 1 < NIVELES.length) { estado = 'transicion'; temporizador = 2; }
+    else { estado = 'victoria'; btnReiniciar.hidden = false; }
+  } else if (heroe.vida <= 0) {
+    estado = 'derrota'; temporizador = 1.5;
+  }
+}
+
+function crearChispas(x, y, color, cantidad) {
+  for (let i = 0; i < cantidad; i++) {
+    const a = Math.random() * Math.PI * 2, v = 60 + Math.random() * 160;
+    chispas.push({ x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v, vida: 0.3 + Math.random() * 0.3, color });
+  }
+}
+
+/* ---------- Dibujo ---------- */
+function barra(x, y, w, h, frac, color) {
+  g.fillStyle = '#0e1f27'; g.fillRect(x, y, w, h);
+  g.fillStyle = color;     g.fillRect(x, y, w * Math.max(0, frac), h);
+  g.strokeStyle = '#2a4b59'; g.lineWidth = 1; g.strokeRect(x + .5, y + .5, w - 1, h - 1);
+}
+function textoCentrado(txt, y, tam, color) {
+  g.font = `800 ${tam}px "Bricolage Grotesque", "Trebuchet MS", sans-serif`;
+  g.textAlign = 'center'; g.fillStyle = color; g.fillText(txt, W / 2, y);
+}
+
+function dibujar() {
+  // Fondo
+  g.fillStyle = '#0b1a21'; g.fillRect(0, 0, W, H);
+  g.fillStyle = '#12303b'; g.fillRect(0, H - 30, W, 30);
+  g.strokeStyle = '#1b3f4c'; g.lineWidth = 1;
+  for (let x = 0; x < W; x += 50) { g.beginPath(); g.moveTo(x, 0); g.lineTo(x, H - 30); g.stroke(); }
+
+  // Héroe
+  g.fillStyle = heroe.golpe > 0 ? '#ffffff' : '#3b6cff';
+  g.fillRect(heroe.x, heroe.y, heroe.w, heroe.h);
+
+  // Escudo (visible mientras el puño siga cerrado)
+  if (heroe.escudo) {
+    g.strokeStyle = 'rgba(127,176,255,.95)'; g.fillStyle = 'rgba(80,130,255,.25)'; g.lineWidth = 4;
+    g.beginPath(); g.arc(heroe.x + heroe.w / 2, heroe.y + heroe.h / 2, 48, -Math.PI / 2, Math.PI / 2);
+    g.closePath(); g.fill(); g.stroke();
+  }
+
+  // Enemigo + barra de vida pequeña
+  for (const e of enemigos) {
+    g.fillStyle = e.golpe > 0 ? '#ffffff' : '#e5484d';
+    g.fillRect(e.x, e.y, e.w, e.h);
+    barra(e.x - 4, e.y - 12, e.w + 8, 6, e.vida / e.vidaMax, '#e5484d');
+  }
+
+  // Proyectiles
+  for (const b of balasJugador) {
+    g.fillStyle = b.pesada ? '#f5b942' : '#9fd0ff';
+    g.beginPath(); g.arc(b.x, b.y, b.r, 0, Math.PI * 2); g.fill();
+  }
+  g.fillStyle = '#ff7a7e';
+  for (const b of balasEnemigo) { g.beginPath(); g.arc(b.x, b.y, b.r, 0, Math.PI * 2); g.fill(); }
+  for (const c of chispas) { g.globalAlpha = Math.max(0, c.vida * 2); g.fillStyle = c.color; g.fillRect(c.x, c.y, 3, 3); }
+  g.globalAlpha = 1;
+
+  // ---------- HUD ----------
+  g.font = '600 14px "Bricolage Grotesque", sans-serif'; g.textAlign = 'left'; g.fillStyle = '#eaf2f4';
+  g.fillText('Tu vida', 16, 24);
+  barra(16, 30, 200, 12, heroe.vida / heroe.vidaMax, '#3b6cff');
+  g.fillText('Ataque pesado', 16, 64);
+  barra(16, 70, 200, 8, 1 - recargaPesada / ATAQUE_PESADO.recarga, '#f5b942');
+
+  g.textAlign = 'right';
+  g.fillText('Nivel ' + (nivel + 1) + ' de ' + NIVELES.length, W - 16, 24);
+  g.fillStyle = '#9db6bf';
+  g.fillText('Gesto: ' + nombreGesto(gestoEfectivo()), W - 16, 46);
+  g.fillText('Enemigos restantes: ' + enemigos.length, W - 16, 68);
+
+  // ---------- Pantallas de estado ----------
+  if (estado !== 'playing') {
+    g.fillStyle = 'rgba(8,20,26,.72)'; g.fillRect(0, 0, W, H);
+    if (estado === 'transicion') {
+      textoCentrado('¡' + NIVELES[nivel].nombre + ' superado!', H / 2 - 6, 40, '#3ddc97');
+      textoCentrado('Preparando ' + NIVELES[nivel + 1].nombre + '…', H / 2 + 32, 20, '#eaf2f4');
+    } else if (estado === 'derrota') {
+      textoCentrado('Derrota', H / 2 - 6, 44, '#e5484d');
+      textoCentrado('Reiniciando ' + NIVELES[nivel].nombre + '…', H / 2 + 32, 20, '#eaf2f4');
+    } else if (estado === 'victoria') {
+      textoCentrado('¡Victoria!', H / 2 - 6, 52, '#f5b942');
+      textoCentrado('Superaste los ' + NIVELES.length + ' niveles.', H / 2 + 30, 20, '#eaf2f4');
+    }
+  }
+}
+</script>
+</body>
+</html>
